@@ -40,15 +40,17 @@ def build_label_map(data_dir: Path) -> dict:
 
 
 def collect_images(data_dir: Path, label_map: dict) -> list:
-    """Walk the dataset and build one record per image."""
+    """Walk the dataset and build one record per image.
+    Paths are stored relative to the project root, in POSIX form, so the
+    index stays valid when the project is checked out somewhere else."""
     records = []
     for class_name, class_index in label_map.items():
-        class_dir = os.path.join(data_dir, class_name)
-        for fname in os.listdir(class_dir):
+        class_dir = data_dir / class_name
+        for fname in sorted(os.listdir(class_dir)):
             image_id = os.path.splitext(fname)[0]
             records.append({
                 "image_id": image_id,
-                "path": os.path.join(class_dir, fname),
+                "path": (class_dir / fname).relative_to(cfg.PROJECT_ROOT).as_posix(),
                 "class_name": class_name,
                 "class_index": class_index,
             })
@@ -56,7 +58,7 @@ def collect_images(data_dir: Path, label_map: dict) -> list:
 
 
 def stratified_split(records: list) -> list:
-    """Split records into train/val/test, sos.path.join(OUTPUT_DIR, "label_map.json")tratified by class_index,
+    """Split records into train/val/test, stratified by class_index,
     with a fixed seed so the split is reproducible."""
     labels = [r["class_index"] for r in records]
 
@@ -110,6 +112,9 @@ def verify_split(records: list, label_map: dict) -> None:
 def main():
     label_map = build_label_map(DATA_DIR)
     assert len(label_map) == 38, f"Expected 38 classes, got {len(label_map)}"
+
+    cfg.LABEL_MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cfg.SPLIT_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     with open(cfg.LABEL_MAP_PATH, "w") as f:
         json.dump(label_map, f, indent=2)

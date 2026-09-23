@@ -15,6 +15,7 @@ class Config:
     SPLIT_INDEX_PATH: Path = DATA_ROOT / "processed" / "split_index.json"
     CORRUPTED_DIR: Path = DATA_ROOT / "corrupted"
     CORRUPTION_MANIFEST_PATH: Path = DATA_ROOT / "processed" / "corruption_manifest.json"
+    MANIFEST_PATH: Path = DATA_ROOT / "processed" / "manifest.json"
 
     # Reproducibility
     SEED: int = 42
@@ -26,10 +27,10 @@ class Config:
 
     # Corruption suite
     # None = corrupt the full test split; an int = sample that many images per class
-    CORRUPTION_SAMPLE_PER_CLASS: int | None = 5
+    CORRUPTION_SAMPLE_PER_CLASS: int | None = None
     
     # Parallelism: None = use all CPU cores minus one
-    NUM_WORKERS: int | None = None
+    NUM_WORKERS: int | None = 10
 
 
 cfg = Config()
