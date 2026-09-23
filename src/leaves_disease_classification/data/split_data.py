@@ -20,7 +20,7 @@ from sklearn.model_selection import train_test_split
 
 # ---- Config ----
 DATA_DIR = cfg.DATA_DIR  
-OUTPUT_DIR = "../../../data/processed"            
+OUTPUT_DIR = cfg.SPLIT_INDEX_PATH
 SEED = cfg.SEED
 TRAIN_RATIO = cfg.TRAIN_RATIO
 VAL_RATIO = cfg.VAL_RATIO
@@ -56,7 +56,7 @@ def collect_images(data_dir: Path, label_map: dict) -> list:
 
 
 def stratified_split(records: list) -> list:
-    """Split records into train/val/test, stratified by class_index,
+    """Split records into train/val/test, sos.path.join(OUTPUT_DIR, "label_map.json")tratified by class_index,
     with a fixed seed so the split is reproducible."""
     labels = [r["class_index"] for r in records]
 
@@ -111,7 +111,7 @@ def main():
     label_map = build_label_map(DATA_DIR)
     assert len(label_map) == 38, f"Expected 38 classes, got {len(label_map)}"
 
-    with open(os.path.join(OUTPUT_DIR, "label_map.json"), "w") as f:
+    with open(cfg.LABEL_MAP_PATH, "w") as f:
         json.dump(label_map, f, indent=2)
 
     records = collect_images(DATA_DIR, label_map)
@@ -120,7 +120,7 @@ def main():
     records = stratified_split(records)
     verify_split(records, label_map)
 
-    with open(os.path.join(OUTPUT_DIR, "split_index.json"), "w") as f:
+    with open(OUTPUT_DIR, "w") as f:
         json.dump(records, f, indent=2)
 
     print(f"\nWrote label_map.json and split_index.json to {OUTPUT_DIR}")

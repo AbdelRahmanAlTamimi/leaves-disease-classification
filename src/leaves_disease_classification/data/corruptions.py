@@ -1,104 +1,93 @@
 """
-Corruption suite for PlantVillage -- generates a corrupted copy of the
-test split at 3 severity levels for each corruption type. This is the
-project's labeled drift ground truth: we know exactly which corruption
-and severity was applied to each generated image, so drift detectors
-built later can be scored against a known answer instead of guessed.
+Corruption suite for PlantVillage.
 
-Reads:  split_index.json (produced by build_dataset_split.py)
-Writes: <OUTPUT_ROOT>/<corruption_type>/severity_<n>/<class_name>/<image_id>.jpg
-        corruption_manifest.json -- one record per generated image, with
-        the same shape as split_index.json plus corruption/severity fields.
+Generates a corrupted copy of the test split at 3 severity levels for each
+corruption type. This is the project's labeled drift ground truth: every
+generated image records which corruption and severity was applied, so drift
+detectors built later can be scored against a known answer.
+
+Each source image is processed in a separate worker process (multiprocessing),
+so work runs in parallel across CPU cores without GIL contention. The manifest
+order is deterministic regardless of the number of workers.
+
+Reads:  cfg.SPLIT_INDEX_PATH
+Writes: cfg.CORRUPTED_DIR/<corruption>/severity_<n>/<class_name>/<image_id>.jpg
+        cfg.CORRUPTION_MANIFEST_PATH (one record per generated image)
+
+Run:    uv run python -m leaves_disease_classification.data.corruptions
 """
 
-import os
 import io
 import json
+import os
+import random
+import time
+from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageEnhance, ImageFilter
 
-# ---- Config ----
-SPLIT_INDEX_PATH = "split_index.json"   # EDIT: path to the file from build_dataset_split.py
-OUTPUT_ROOT = "corrupted_test"          # EDIT: where corrupted images are written
-MANIFEST_OUT = "corruption_manifest.json"
+from leaves_disease_classification.config import cfg
 
-# Severity levels 1 (mild) -> 3 (severe) for each corruption type.
-GAUSSIAN_BLUR_RADIUS = [1, 2, 4]
-BRIGHTNESS_UP_FACTOR = [1.3, 1.6, 2.0]
-BRIGHTNESS_DOWN_FACTOR = [0.7, 0.5, 0.3]
-JPEG_QUALITY = [50, 30, 10]
-DOWNSCALE_UPSCALE_SIZE = [128, 96, 64]
-MOTION_BLUR_KERNEL_SIZE = [5, 9, 15]
+SEVERITIES = (1, 2, 3)
 
-
-def load_test_records(split_index_path: str) -> list:
-    with open(split_index_path) as f:
-        records = json.load(f)
-    test_records = [r for r in records if r["split"] == "test"]
-    print(f"Loaded {len(test_records)} test images to corrupt.")
-    return test_records
+# Parameters per severity level: index 0 = severity 1 (mild), index 2 = severity 3 (severe).
+# Keep data/README.md in sync with these values.
+GAUSSIAN_BLUR_RADIUS = (1, 2, 4)
+BRIGHTNESS_UP_FACTOR = (1.3, 1.6, 2.0)
+BRIGHTNESS_DOWN_FACTOR = (0.7, 0.5, 0.3)
+JPEG_QUALITY = (50, 30, 10)
+DOWNSCALE_UPSCALE_SIZE = (128, 96, 64)
+MOTION_BLUR_KERNEL_SIZE = (5, 9, 15)  # must be odd
 
 
-def open_as_rgb(path: str) -> Image.Image:
-    """Force RGB here specifically because this script re-encodes as JPEG
-    and applies pixel-level filters that assume 3 channels -- this is a
-    data-generation necessity, independent of any RGB policy in the
-    serving API."""
-    img = Image.open(path)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    return img
-
+# ---------- Corruption functions ----------
 
 def apply_gaussian_blur(img: Image.Image, severity: int) -> Image.Image:
-    radius = GAUSSIAN_BLUR_RADIUS[severity - 1]
-    return img.filter(ImageFilter.GaussianBlur(radius=radius))
+    return img.filter(ImageFilter.GaussianBlur(radius=GAUSSIAN_BLUR_RADIUS[severity - 1]))
 
 
 def apply_brightness_up(img: Image.Image, severity: int) -> Image.Image:
-    factor = BRIGHTNESS_UP_FACTOR[severity - 1]
-    return ImageEnhance.Brightness(img).enhance(factor)
+    return ImageEnhance.Brightness(img).enhance(BRIGHTNESS_UP_FACTOR[severity - 1])
 
 
 def apply_brightness_down(img: Image.Image, severity: int) -> Image.Image:
-    factor = BRIGHTNESS_DOWN_FACTOR[severity - 1]
-    return ImageEnhance.Brightness(img).enhance(factor)
+    return ImageEnhance.Brightness(img).enhance(BRIGHTNESS_DOWN_FACTOR[severity - 1])
 
 
 def apply_jpeg_compression(img: Image.Image, severity: int) -> Image.Image:
-    quality = JPEG_QUALITY[severity - 1]
     buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=quality)
+    img.save(buffer, format="JPEG", quality=JPEG_QUALITY[severity - 1])
     buffer.seek(0)
-    return Image.open(buffer).convert("RGB")
+    return Image.open(buffer).copy()  # copy() forces a full load before buffer is released
 
 
 def apply_downscale_upscale(img: Image.Image, severity: int) -> Image.Image:
     size = DOWNSCALE_UPSCALE_SIZE[severity - 1]
-    original_size = img.size
-    small = img.resize((size, size), Image.BILINEAR)
-    return small.resize(original_size, Image.BILINEAR)
+    small = img.resize((size, size), Image.Resampling.BILINEAR)
+    return small.resize(img.size, Image.Resampling.BILINEAR)
 
 
 def apply_motion_blur(img: Image.Image, severity: int) -> Image.Image:
+    """Horizontal motion blur as a vectorized moving average along the width axis."""
     kernel_size = MOTION_BLUR_KERNEL_SIZE[severity - 1]
-    kernel = np.zeros((kernel_size, kernel_size))
-    kernel[kernel_size // 2, :] = 1.0
-    kernel = kernel / kernel.sum()
-
-    arr = np.array(img).astype(np.float32)
-    blurred = np.zeros_like(arr)
+    arr = np.asarray(img, dtype=np.float32)
+    width = arr.shape[1]
     pad = kernel_size // 2
-    padded = np.pad(arr, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
-    for i in range(arr.shape[0]):
-        for j in range(arr.shape[1]):
-            region = padded[i:i + kernel_size, j:j + kernel_size, :]
-            blurred[i, j, :] = np.tensordot(kernel, region, axes=([0, 1], [0, 1]))
-    return Image.fromarray(blurred.astype(np.uint8))
+    padded = np.pad(arr, ((0, 0), (pad, pad), (0, 0)), mode="edge")
+
+    blurred = np.zeros_like(arr)
+    for shift in range(kernel_size):
+        blurred += padded[:, shift:shift + width, :]
+    blurred /= kernel_size
+
+    return Image.fromarray(np.clip(blurred, 0, 255).astype(np.uint8))
 
 
-CORRUPTIONS = {
+CORRUPTIONS: dict[str, Callable[[Image.Image, int], Image.Image]] = {
     "gaussian_blur": apply_gaussian_blur,
     "brightness_up": apply_brightness_up,
     "brightness_down": apply_brightness_down,
@@ -108,58 +97,122 @@ CORRUPTIONS = {
 }
 
 
-def generate_corrupted_set(test_records: list) -> list:
-    output_records = []
-    total = len(test_records) * len(CORRUPTIONS) * 3
-    done = 0
+# ---------- Helpers ----------
 
+def resolve_path(path_str: str) -> Path:
+    """Paths in the split index are stored relative to the project root."""
+    path = Path(path_str)
+    return path if path.is_absolute() else cfg.PROJECT_ROOT / path
+
+
+def to_relative_posix(path: Path) -> str:
+    return path.relative_to(cfg.PROJECT_ROOT).as_posix()
+
+
+def load_test_records() -> list[dict]:
+    records = json.loads(cfg.SPLIT_INDEX_PATH.read_text())
+    return [r for r in records if r["split"] == "test"]
+
+
+def sample_per_class(records: list[dict], n: int, seed: int) -> list[dict]:
+    """Deterministic per-class sample, independent of file order on disk."""
+    rng = random.Random(seed)
+    by_class: dict[str, list[dict]] = defaultdict(list)
+    for r in records:
+        by_class[r["class_name"]].append(r)
+
+    sampled = []
+    for class_name in sorted(by_class):
+        items = sorted(by_class[class_name], key=lambda r: r["image_id"])
+        sampled.extend(items if len(items) <= n else rng.sample(items, n))
+    return sampled
+
+
+def resolve_num_workers() -> int:
+    if cfg.NUM_WORKERS is not None:
+        return max(1, cfg.NUM_WORKERS)
+    return max(1, (os.cpu_count() or 2) - 1)
+
+
+# ---------- Worker (must be a top-level function so it can be pickled) ----------
+
+def process_record(record: dict) -> list[dict]:
+    """Apply every corruption at every severity to one source image.
+    Runs inside a worker process; returns the manifest records it produced."""
+    with Image.open(resolve_path(record["path"])) as src:
+        img = src.copy()
+
+    produced = []
     for corruption_name, corruption_fn in CORRUPTIONS.items():
-        for severity in (1, 2, 3):
-            out_dir_base = os.path.join(
-                OUTPUT_ROOT, corruption_name, f"severity_{severity}"
+        for severity in SEVERITIES:
+            corrupted = corruption_fn(img, severity)
+
+            out_dir = (
+                cfg.CORRUPTED_DIR / corruption_name
+                / f"severity_{severity}" / record["class_name"]
             )
-            for record in test_records:
-                img = open_as_rgb(record["path"])
-                corrupted_img = corruption_fn(img, severity)
+            out_dir.mkdir(parents=True, exist_ok=True)  # safe under concurrent workers
+            out_path = out_dir / f"{record['image_id']}.jpg"
+            corrupted.save(out_path, format="JPEG", quality=95)
 
-                class_dir = os.path.join(out_dir_base, record["class_name"])
-                os.makedirs(class_dir, exist_ok=True)
-                out_path = os.path.join(class_dir, f"{record['image_id']}.jpg")
-                corrupted_img.save(out_path, format="JPEG", quality=95)
+            produced.append({
+                "image_id": record["image_id"],
+                "path": to_relative_posix(out_path),
+                "class_name": record["class_name"],
+                "class_index": record["class_index"],
+                "split": "test",
+                "corruption": corruption_name,
+                "severity": severity,
+                "width": corrupted.width,
+                "height": corrupted.height,
+            })
+    return produced
 
-                output_records.append({
-                    "image_id": record["image_id"],
-                    "path": out_path,
-                    "class_name": record["class_name"],
-                    "class_index": record["class_index"],
-                    "split": "test",
-                    "corruption": corruption_name,
-                    "severity": severity,
-                    "width": corrupted_img.width,
-                    "height": corrupted_img.height,
-                })
 
-                done += 1
-                if done % 500 == 0:
-                    print(f"  {done}/{total} corrupted images generated")
+# ---------- Main generation ----------
+
+def generate_corrupted_set(test_records: list[dict], num_workers: int) -> list[dict]:
+    output_records = []
+    total_sources = len(test_records)
+    chunksize = max(1, total_sources // (num_workers * 20))
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # executor.map preserves input order -> deterministic manifest
+        for i, produced in enumerate(
+            executor.map(process_record, test_records, chunksize=chunksize), start=1
+        ):
+            output_records.extend(produced)
+            if i % 200 == 0 or i == total_sources:
+                print(f"  {i}/{total_sources} source images processed")
 
     return output_records
 
 
-def main():
-    test_records = load_test_records(SPLIT_INDEX_PATH)
-    print(
-        f"Will generate {len(test_records) * len(CORRUPTIONS) * 3} corrupted "
-        f"images ({len(CORRUPTIONS)} corruption types x 3 severities x "
-        f"{len(test_records)} test images). This may take a while."
-    )
+def main() -> None:
+    test_records = load_test_records()
+    print(f"Loaded {len(test_records)} test images.")
 
-    output_records = generate_corrupted_set(test_records)
+    if cfg.CORRUPTION_SAMPLE_PER_CLASS is not None:
+        test_records = sample_per_class(
+            test_records, cfg.CORRUPTION_SAMPLE_PER_CLASS, cfg.SEED
+        )
+        print(f"Sampled {len(test_records)} images "
+              f"({cfg.CORRUPTION_SAMPLE_PER_CLASS} per class).")
 
-    with open(MANIFEST_OUT, "w") as f:
-        json.dump(output_records, f, indent=2)
+    num_workers = resolve_num_workers()
+    total = len(test_records) * len(CORRUPTIONS) * len(SEVERITIES)
+    print(f"Generating {total} corrupted images "
+          f"({len(CORRUPTIONS)} corruptions x {len(SEVERITIES)} severities) "
+          f"using {num_workers} worker processes.")
 
-    print(f"\nWrote {len(output_records)} corrupted-image records to {MANIFEST_OUT}")
+    start = time.perf_counter()
+    output_records = generate_corrupted_set(test_records, num_workers)
+    elapsed = time.perf_counter() - start
+
+    cfg.CORRUPTION_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    cfg.CORRUPTION_MANIFEST_PATH.write_text(json.dumps(output_records, indent=2))
+    print(f"\nWrote {len(output_records)} records to {cfg.CORRUPTION_MANIFEST_PATH}")
+    print(f"Elapsed: {elapsed:.1f}s ({len(output_records) / elapsed:.1f} images/s)")
 
 
 if __name__ == "__main__":
