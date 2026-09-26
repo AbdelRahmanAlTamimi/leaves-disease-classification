@@ -1,0 +1,6 @@
+outs:
+- md5: 704f7186c4c5da8c4c941675b7e67cd3.dir
+  size: 850772034
+  nfiles: 54305
+  hash: md5
+  path: color

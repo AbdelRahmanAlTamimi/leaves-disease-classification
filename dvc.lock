@@ -1,0 +1,76 @@
+schema: '2.0'
+stages:
+  split:
+    cmd: uv run python -m leaves_disease_classification.data.split_data
+    deps:
+    - path: data/raw/plantvillage/color
+      hash: md5
+      md5: 704f7186c4c5da8c4c941675b7e67cd3.dir
+      size: 850772034
+      nfiles: 54305
+    - path: src/leaves_disease_classification/config.py
+      hash: md5
+      md5: 493f6f09b5547cb361038e74c5fa3176
+      size: 1136
+    - path: src/leaves_disease_classification/data/split_data.py
+      hash: md5
+      md5: 4d32ca6570965f96b09d6aa4437cdaeb
+      size: 4486
+    outs:
+    - path: data/label_map.json
+      hash: md5
+      md5: 25c96bb38645038f312fae9d94aaff55
+      size: 1318
+    - path: data/processed/split_index.json
+      hash: md5
+      md5: ab9d31b8f2073bda6d2cdf7114d73dfb
+      size: 16388754
+  corruptions:
+    cmd: uv run python -m leaves_disease_classification.data.corruptions
+    deps:
+    - path: data/processed/split_index.json
+      hash: md5
+      md5: ab9d31b8f2073bda6d2cdf7114d73dfb
+      size: 16388754
+    - path: src/leaves_disease_classification/config.py
+      hash: md5
+      md5: 493f6f09b5547cb361038e74c5fa3176
+      size: 1136
+    - path: src/leaves_disease_classification/data/corruptions.py
+      hash: md5
+      md5: 347ed0b10a02edc54481678804f88ded
+      size: 8041
+    outs:
+    - path: data/corrupted
+      hash: md5
+      md5: fa303a2c11e819d0a4b484587b05cd3f.dir
+      size: 2961244651
+      nfiles: 146628
+    - path: data/processed/corruption_manifest.json
+      hash: md5
+      md5: 81e14ddee5e1c3d341102d62f506d636
+      size: 59625980
+  manifest:
+    cmd: uv run python -m leaves_disease_classification.data.build_manifest
+    deps:
+    - path: data/processed/corruption_manifest.json
+      hash: md5
+      md5: 81e14ddee5e1c3d341102d62f506d636
+      size: 59625980
+    - path: data/processed/split_index.json
+      hash: md5
+      md5: ab9d31b8f2073bda6d2cdf7114d73dfb
+      size: 16388754
+    - path: src/leaves_disease_classification/config.py
+      hash: md5
+      md5: 493f6f09b5547cb361038e74c5fa3176
+      size: 1136
+    - path: src/leaves_disease_classification/data/build_manifest.py
+      hash: md5
+      md5: 74eb0d3e442ec4f2eba38f4bf2b14df1
+      size: 2670
+    outs:
+    - path: data/processed/manifest.json
+      hash: md5
+      md5: d8c1c2d6114e6eecdfd722bea14b8333
+      size: 85267212

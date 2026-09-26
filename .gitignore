@@ -1,1 +1,7 @@
+# Local copy of the unused Kaggle folders (grayscale, segmented)
 plantvillage-dataset/
+
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/

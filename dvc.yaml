@@ -1,0 +1,31 @@
+stages:
+  split:
+    cmd: uv run python -m leaves_disease_classification.data.split_data
+    deps:
+      - data/raw/plantvillage/color
+      - src/leaves_disease_classification/config.py
+      - src/leaves_disease_classification/data/split_data.py
+    outs:
+      - data/processed/split_index.json
+      - data/label_map.json:
+          cache: false
+
+  corruptions:
+    cmd: uv run python -m leaves_disease_classification.data.corruptions
+    deps:
+      - data/processed/split_index.json
+      - src/leaves_disease_classification/config.py
+      - src/leaves_disease_classification/data/corruptions.py
+    outs:
+      - data/corrupted
+      - data/processed/corruption_manifest.json
+
+  manifest:
+    cmd: uv run python -m leaves_disease_classification.data.build_manifest
+    deps:
+      - data/processed/split_index.json
+      - data/processed/corruption_manifest.json
+      - src/leaves_disease_classification/config.py
+      - src/leaves_disease_classification/data/build_manifest.py
+    outs:
+      - data/processed/manifest.json
